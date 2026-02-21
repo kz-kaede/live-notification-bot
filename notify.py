@@ -91,18 +91,18 @@ def build_message(template: str, video_id: str, title: str) -> Tuple[str, str]:
     return text, url
 
 
-# URLをfacet（リンク）に変換
 def parse_urls_to_facets(text: str) -> List[Dict[str, Any]]:
-    facets = []
+    facets: List[Dict[str, Any]] = []
     text_bytes = text.encode("utf-8")
 
     url_regex = rb"(https?:\/\/[^\s]+)"
     for m in re.finditer(url_regex, text_bytes):
-        start = m.start()
-        end = m.end()
-        url = m.group().decode("utf-8")
+        start = m.start(1)
+        end = m.end(1)
+        url = m.group(1).decode("utf-8")
 
         facets.append({
+            "$type": "app.bsky.richtext.facet",
             "index": {"byteStart": start, "byteEnd": end},
             "features": [{
                 "$type": "app.bsky.richtext.facet#link",
@@ -132,7 +132,7 @@ def post_to_bluesky_external(
 
     client.send_post(
         safe_text,
-        facets=facets,
+        facets=facets if facets else None,
         embed={
             "$type": "app.bsky.embed.external",
             "external": {
@@ -181,8 +181,6 @@ def main() -> int:
 
     title = title or "配信中"
     msg, url = build_message(template, live_video_id, title)
-
-    print("Post text:\n", msg)
 
     try:
         post_to_bluesky_external(
