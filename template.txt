@@ -1,3 +1,3 @@
 {title}
-{url}（{now}）
+{url} （{now}）
 @YouTubeより配信中！

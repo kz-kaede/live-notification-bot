@@ -111,29 +111,24 @@ def build_message(template: str, video_id: str, title: str) -> str:
 
 
 # Blueskyに投稿（画像があればサムネ付き）
-def post_to_bluesky(handle: str, app_password: str, text: str, image_bytes: bytes | None) -> None:
+def post_to_bluesky(handle: str, app_password: str, text: str, thumb_url: str | None) -> None:
     client = Client()
     client.login(handle, app_password)
 
-    if image_bytes:
-        # 画像アップロード
-        upload = client.upload_blob(image_bytes)
-
-        # 画像付き投稿
+    if thumb_url:
         client.send_post(
             text=text,
             embed={
-                "$type": "app.bsky.embed.images",
-                "images": [
-                    {
-                        "image": upload.blob,
-                        "alt": "YouTube thumbnail",
-                    }
-                ],
+                "$type": "app.bsky.embed.external",
+                "external": {
+                    "uri": text.split("\n")[1],  # URL部分
+                    "title": "YouTube Live",
+                    "description": "配信中",
+                    "thumb": client.upload_blob(download_image(thumb_url)).blob,
+                },
             },
         )
     else:
-        # テキストのみ投稿
         client.send_post(text=text)
 
 
