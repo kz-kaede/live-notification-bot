@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 import requests
-from atproto import Client
+from atproto import Client, RichText
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -36,7 +36,6 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-# template.txt を読み込む
 def load_template(path: str) -> Optional[str]:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -107,8 +106,13 @@ def post_to_bluesky_external(
     if safe_text == "":
         safe_text = f"{card_title}\n{url}"
 
+    # 本文のURLを facet 化して「クリックできるリンク」にする
+    rt = RichText(text=safe_text)
+    rt.detect_facets(client)  # URL/メンション等を解析して facet を付与
+
     client.send_post(
-        safe_text,
+        rt.text,
+        facets=rt.facets,
         embed={
             "$type": "app.bsky.embed.external",
             "external": {
