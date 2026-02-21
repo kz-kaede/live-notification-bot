@@ -36,6 +36,7 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
+# template.txt を読み込む
 def load_template(path: str) -> Optional[str]:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -70,16 +71,8 @@ def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str]
     snippet = item.get("snippet") or {}
 
     title = snippet.get("title")
-    thumbnails = snippet.get("thumbnails") or {}
 
-    thumb_url = (
-        (thumbnails.get("maxres") or {}).get("url")
-        or (thumbnails.get("high") or {}).get("url")
-        or (thumbnails.get("medium") or {}).get("url")
-        or (thumbnails.get("default") or {}).get("url")
-    )
-
-    return video_id, title, thumb_url
+    return video_id, title, None
 
 
 def build_message(template: str, video_id: str, title: str) -> Tuple[str, str]:
@@ -131,10 +124,11 @@ def main() -> int:
 
     state_path = os.getenv("STATE_PATH", ".state/state.json")
 
+    # template.txt を優先
     template_path = os.getenv("TEMPLATE_PATH", "template.txt")
     file_template = load_template(template_path)
 
-    default_template = "「{title}」\n{url}\n（{now}）\n@YouTubeより配信中！"
+    default_template = "{title}\n{url}\n@YouTubeより配信中！\n{now}"
 
     if file_template:
         template = file_template
