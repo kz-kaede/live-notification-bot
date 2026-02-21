@@ -48,7 +48,7 @@ def load_template(path: str) -> Optional[str]:
         return None
 
 
-def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str], Optional[str]]:
+def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     params = {
         "key": api_key,
         "part": "snippet",
@@ -64,14 +64,30 @@ def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str]
 
     items = data.get("items", [])
     if not items:
-        return None, None
+        return None, None, None, None
 
     item = items[0]
     video_id = (item.get("id") or {}).get("videoId")
     snippet = item.get("snippet") or {}
-    title = snippet.get("title")
 
-    return video_id, title
+    title = snippet.get("title")
+    description = snippet.get("description")
+
+    thumbnails = snippet.get("thumbnails") or {}
+    thumb_url = (
+        (thumbnails.get("maxres") or {}).get("url")
+        or (thumbnails.get("high") or {}).get("url")
+        or (thumbnails.get("medium") or {}).get("url")
+        or (thumbnails.get("default") or {}).get("url")
+    )
+
+    return video_id, title, thumb_url, description
+
+
+def download_image(url: str) -> bytes:
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    return r.content
 
 
 def build_message(template: str, video_id: str, title: str) -> Tuple[str, str]:
@@ -120,6 +136,7 @@ def post_to_bluesky_external(
     url: str,
     card_title: str,
     card_description: str,
+    thumb_url: Optional[str],
 ) -> None:
     client = Client()
     client.login(handle, app_password)
@@ -130,16 +147,26 @@ def post_to_bluesky_external(
 
     facets = parse_urls_to_facets(safe_text)
 
+    external: Dict[str, Any] = {
+        "uri": url,
+        "title": card_title,
+        "description": card_description,
+    }
+
+    if thumb_url:
+        try:
+            image_bytes = download_image(thumb_url)
+            upload = client.upload_blob(image_bytes)
+            external["thumb"] = upload.blob
+        except Exception as e:
+            print(f"WARN: thumbnail upload failed: {e}", file=sys.stderr)
+
     client.send_post(
         safe_text,
         facets=facets if facets else None,
         embed={
             "$type": "app.bsky.embed.external",
-            "external": {
-                "uri": url,
-                "title": card_title,
-                "description": card_description,
-            },
+            "external": external,
         },
     )
 
@@ -166,7 +193,7 @@ def main() -> int:
     last_notified = state.get("last_notified_video_id")
 
     try:
-        live_video_id, title = youtube_get_live_video(yt_api_key, yt_channel_id)
+        live_video_id, title, thumb_url, description = youtube_get_live_video(yt_api_key, yt_channel_id)
     except Exception as e:
         print(f"ERROR: YouTube API call failed: {e}", file=sys.stderr)
         return 2
@@ -189,7 +216,8 @@ def main() -> int:
             msg,
             url,
             title,
-            "YouTubeで配信中",
+            description or "YouTubeで配信中",
+            thumb_url,
         )
     except Exception as e:
         print(f"ERROR: Bluesky post failed: {e}", file=sys.stderr)
