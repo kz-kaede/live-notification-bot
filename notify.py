@@ -103,8 +103,12 @@ def post_to_bluesky_external(
     client = Client()
     client.login(handle, app_password)
 
+    safe_text = (text or "").strip()
+    if safe_text == "":
+        safe_text = f"{card_title}\n{url}"
+
     client.send_post(
-        text=text,
+        safe_text,
         embed={
             "$type": "app.bsky.embed.external",
             "external": {
@@ -154,6 +158,9 @@ def main() -> int:
 
     title = title or "配信中"
     msg, url = build_message(template, live_video_id, title)
+    
+    print("Post text repr:", repr(msg))
+    print("Post text plain:\n" + msg)
 
     try:
         post_to_bluesky_external(
