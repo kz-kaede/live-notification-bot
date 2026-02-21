@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
 
@@ -20,12 +21,40 @@ def must_env(name: str) -> str:
     return v
 
 
-def load_state(path: str) -> Dict[str, Any]:
+def read_text_file_guess_encoding(path: str) -> Optional[str]:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(path, "rb") as f:
+            raw = f.read()
     except FileNotFoundError:
+        return None
+
+    # BOMあり/UTF-16の可能性を先に潰す
+    for enc in (
+        "utf-8-sig",
+        "utf-16",
+        "utf-16le",
+        "utf-16be",
+        "utf-8",
+        "cp932",
+        "shift_jis",
+        "euc_jp",
+    ):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+
+    # 最終手段: 置換して続行（落とさない）
+    return raw.decode("utf-8", errors="replace")
+
+
+def load_state(path: str) -> Dict[str, Any]:
+    txt = read_text_file_guess_encoding(path)
+    if txt is None:
         return {}
+
+    try:
+        return json.loads(txt)
     except json.JSONDecodeError:
         return {}
 
@@ -63,19 +92,7 @@ def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str]
 
 
 def load_template(path: str) -> Optional[str]:
-    try:
-        with open(path, "rb") as f:
-            raw = f.read()
-    except FileNotFoundError:
-        return None
-
-    for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "euc_jp"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            pass
-
-    return raw.decode("utf-8", errors="replace")
+    return read_text_file_guess_encoding(path)
 
 
 def build_message(template: str, video_id: str, title: str) -> str:
@@ -83,13 +100,20 @@ def build_message(template: str, video_id: str, title: str) -> str:
     jst = timezone(timedelta(hours=9))
     now = datetime.now(jst).strftime("%Y-%m-%d %H:%M")
 
-    return (
+    msg = (
         template
         .replace("{url}", url)
         .replace("{video_id}", video_id)
         .replace("{title}", title or "")
         .replace("{now}", now)
     )
+
+    # URL直後に文字がくっついてリンク化が不安定になるのを予防
+    msg = msg.replace(url + "（", url + "\n（")
+    msg = msg.replace(url + " (", url + "\n(")
+
+    # 末尾の余計な空白だけ整理
+    return msg.strip()
 
 
 def post_to_bluesky(handle: str, app_password: str, text: str) -> None:
@@ -114,7 +138,7 @@ def main() -> int:
     else:
         template = os.getenv(
             "MESSAGE_TEMPLATE",
-            "{title}\n{url}\n@YouTubeより配信中！\n（{now}）"
+            "「{title}」\n{url}\n（{now}）\n@YouTubeより配信中！"
         )
 
     state = load_state(state_path)
@@ -124,6 +148,7 @@ def main() -> int:
         live_video_id, title = youtube_get_live_video(yt_api_key, yt_channel_id)
     except Exception as e:
         print(f"ERROR: YouTube API call failed: {type(e).__name__}: {e!r}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
         return 2
 
     if not live_video_id:
@@ -141,6 +166,7 @@ def main() -> int:
         post_to_bluesky(bsky_handle, bsky_app_password, msg)
     except Exception as e:
         print(f"ERROR: Bluesky post failed: {type(e).__name__}: {e!r}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
         return 3
 
     state["last_notified_video_id"] = live_video_id
