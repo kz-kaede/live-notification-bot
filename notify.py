@@ -2,11 +2,12 @@ import json
 import os
 import sys
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import requests
-from atproto import Client, RichText
+from atproto import Client
 
+import re
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -47,7 +48,7 @@ def load_template(path: str) -> Optional[str]:
         return None
 
 
-def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str], Optional[str]]:
     params = {
         "key": api_key,
         "part": "snippet",
@@ -63,15 +64,14 @@ def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str]
 
     items = data.get("items", [])
     if not items:
-        return None, None, None
+        return None, None
 
     item = items[0]
     video_id = (item.get("id") or {}).get("videoId")
     snippet = item.get("snippet") or {}
-
     title = snippet.get("title")
 
-    return video_id, title, None
+    return video_id, title
 
 
 def build_message(template: str, video_id: str, title: str) -> Tuple[str, str]:
@@ -91,6 +91,28 @@ def build_message(template: str, video_id: str, title: str) -> Tuple[str, str]:
     return text, url
 
 
+# URLをfacet（リンク）に変換
+def parse_urls_to_facets(text: str) -> List[Dict[str, Any]]:
+    facets = []
+    text_bytes = text.encode("utf-8")
+
+    url_regex = rb"(https?:\/\/[^\s]+)"
+    for m in re.finditer(url_regex, text_bytes):
+        start = m.start()
+        end = m.end()
+        url = m.group().decode("utf-8")
+
+        facets.append({
+            "index": {"byteStart": start, "byteEnd": end},
+            "features": [{
+                "$type": "app.bsky.richtext.facet#link",
+                "uri": url,
+            }],
+        })
+
+    return facets
+
+
 def post_to_bluesky_external(
     handle: str,
     app_password: str,
@@ -103,16 +125,14 @@ def post_to_bluesky_external(
     client.login(handle, app_password)
 
     safe_text = (text or "").strip()
-    if safe_text == "":
+    if not safe_text:
         safe_text = f"{card_title}\n{url}"
 
-    # 本文のURLを facet 化して「クリックできるリンク」にする
-    rt = RichText(text=safe_text)
-    rt.detect_facets(client)  # URL/メンション等を解析して facet を付与
+    facets = parse_urls_to_facets(safe_text)
 
     client.send_post(
-        rt.text,
-        facets=rt.facets,
+        safe_text,
+        facets=facets,
         embed={
             "$type": "app.bsky.embed.external",
             "external": {
@@ -132,7 +152,6 @@ def main() -> int:
 
     state_path = os.getenv("STATE_PATH", ".state/state.json")
 
-    # template.txt を優先
     template_path = os.getenv("TEMPLATE_PATH", "template.txt")
     file_template = load_template(template_path)
 
@@ -147,7 +166,7 @@ def main() -> int:
     last_notified = state.get("last_notified_video_id")
 
     try:
-        live_video_id, title, _ = youtube_get_live_video(yt_api_key, yt_channel_id)
+        live_video_id, title = youtube_get_live_video(yt_api_key, yt_channel_id)
     except Exception as e:
         print(f"ERROR: YouTube API call failed: {e}", file=sys.stderr)
         return 2
@@ -162,9 +181,8 @@ def main() -> int:
 
     title = title or "配信中"
     msg, url = build_message(template, live_video_id, title)
-    
-    print("Post text repr:", repr(msg))
-    print("Post text plain:\n" + msg)
+
+    print("Post text:\n", msg)
 
     try:
         post_to_bluesky_external(
