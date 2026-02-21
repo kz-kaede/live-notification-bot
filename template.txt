@@ -1,3 +1,4 @@
 {title}
-{url} {now}
+{url}
 @YouTubeより配信中！
+（{now}）
