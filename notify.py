@@ -2,20 +2,17 @@ import json
 import os
 import sys
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 from atproto import Client
 
-# 警告を非表示（atproto/pydantic由来）
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# YouTube Data API エンドポイント
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 
 
-# 環境変数を取得（未設定なら例外）
 def must_env(name: str) -> str:
     v = os.getenv(name)
     if not v:
@@ -23,7 +20,6 @@ def must_env(name: str) -> str:
     return v
 
 
-# 前回通知した動画IDなどの状態を読み込む
 def load_state(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -34,15 +30,15 @@ def load_state(path: str) -> Dict[str, Any]:
         return {}
 
 
-# 状態を保存（重複投稿防止）
 def save_state(path: str, state: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirpath = os.path.dirname(path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-# 現在ライブ配信中の動画ID・タイトルを取得
-def youtube_get_live_video(api_key: str, channel_id: str):
+def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str], Optional[str]]:
     params = {
         "key": api_key,
         "part": "snippet",
@@ -62,28 +58,31 @@ def youtube_get_live_video(api_key: str, channel_id: str):
 
     item = items[0]
     video_id = (item.get("id") or {}).get("videoId")
-    snippet = item.get("snippet") or {}
-    title = snippet.get("title")
-
+    title = ((item.get("snippet") or {}).get("title")) or None
     return video_id, title
 
-# テンプレートファイルを読み込む
-def load_template(path: str) -> str:
+
+def load_template(path: str) -> Optional[str]:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+        with open(path, "rb") as f:
+            raw = f.read()
     except FileNotFoundError:
         return None
 
-# 投稿メッセージをテンプレートから生成
+    for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "euc_jp"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+
+    return raw.decode("utf-8", errors="replace")
+
+
 def build_message(template: str, video_id: str, title: str) -> str:
     url = f"https://www.youtube.com/watch?v={video_id}"
-    
-    # 日本時間（JST）で現在時刻を取得
     jst = timezone(timedelta(hours=9))
     now = datetime.now(jst).strftime("%Y-%m-%d %H:%M")
 
-    # プレースホルダを置換
     return (
         template
         .replace("{url}", url)
@@ -93,17 +92,13 @@ def build_message(template: str, video_id: str, title: str) -> str:
     )
 
 
-# Blueskyに投稿（画像があればサムネ付き）
 def post_to_bluesky(handle: str, app_password: str, text: str) -> None:
     client = Client()
     client.login(handle, app_password)
-
     client.send_post(text=text)
 
 
-# メイン処理
 def main() -> int:
-    # 必須環境変数の取得
     yt_api_key = must_env("YOUTUBE_API_KEY")
     yt_channel_id = must_env("YOUTUBE_CHANNEL_ID")
     bsky_handle = must_env("BLUESKY_HANDLE")
@@ -111,7 +106,6 @@ def main() -> int:
 
     state_path = os.getenv("STATE_PATH", ".state/state.json")
 
-    # 投稿テンプレート（template.txt を優先。無ければ環境変数、さらに無ければデフォルト）
     template_path = os.getenv("TEMPLATE_PATH", "template.txt")
     file_template = load_template(template_path)
 
@@ -120,48 +114,35 @@ def main() -> int:
     else:
         template = os.getenv(
             "MESSAGE_TEMPLATE",
-            "「{title}」\n{url} {now}\n@YouTubeより配信中！"
+            "{title}\n{url}\n@YouTubeより配信中！\n（{now}）"
         )
 
-    # 前回通知状態を取得
     state = load_state(state_path)
     last_notified = state.get("last_notified_video_id")
 
     try:
-        # YouTubeからライブ情報取得
         live_video_id, title = youtube_get_live_video(yt_api_key, yt_channel_id)
     except Exception as e:
-        print(f"ERROR: YouTube API call failed: {e}", file=sys.stderr)
+        print(f"ERROR: YouTube API call failed: {type(e).__name__}: {e!r}", file=sys.stderr)
         return 2
 
-    # 配信していない場合
     if not live_video_id:
         print("No live broadcast detected.")
         return 0
 
-    # 既に通知済みならスキップ
     if live_video_id == last_notified:
         print(f"Already notified for video_id={live_video_id}")
         return 0
 
-    # タイトルが取得できない場合のフォールバック
     title = title or "配信中"
-
-    # 投稿メッセージ生成
     msg = build_message(template, live_video_id, title)
 
     try:
-        # Blueskyへ投稿（画像が取れなければテキストのみ）
-        post_to_bluesky(
-            bsky_handle,
-            bsky_app_password,
-            msg
-        )
+        post_to_bluesky(bsky_handle, bsky_app_password, msg)
     except Exception as e:
-        print(f"ERROR: Bluesky post failed: {e}", file=sys.stderr)
+        print(f"ERROR: Bluesky post failed: {type(e).__name__}: {e!r}", file=sys.stderr)
         return 3
 
-    # 通知済みIDを保存（重複防止）
     state["last_notified_video_id"] = live_video_id
     save_state(state_path, state)
 
