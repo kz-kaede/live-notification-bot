@@ -41,13 +41,13 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-# 現在ライブ配信中の動画ID・タイトル・サムネURLを取得
+# 現在ライブ配信中の動画ID・タイトルを取得
 def youtube_get_live_video(api_key: str, channel_id: str):
     params = {
         "key": api_key,
         "part": "snippet",
         "channelId": channel_id,
-        "eventType": "live",   # 配信中の動画のみ取得
+        "eventType": "live",
         "type": "video",
         "maxResults": 1,
         "order": "date",
@@ -58,31 +58,14 @@ def youtube_get_live_video(api_key: str, channel_id: str):
 
     items = data.get("items", [])
     if not items:
-        return None, None, None
+        return None, None
 
     item = items[0]
     video_id = (item.get("id") or {}).get("videoId")
     snippet = item.get("snippet") or {}
-
     title = snippet.get("title")
-    thumbnails = snippet.get("thumbnails") or {}
 
-    # 解像度の高い順にサムネイルURLを取得
-    thumb_url = (
-        (thumbnails.get("maxres") or {}).get("url")
-        or (thumbnails.get("high") or {}).get("url")
-        or (thumbnails.get("medium") or {}).get("url")
-        or (thumbnails.get("default") or {}).get("url")
-    )
-
-    return video_id, title, thumb_url
-
-
-# サムネイル画像をダウンロード（bytesで返す）
-def download_image(url: str) -> bytes:
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    return r.content
+    return video_id, title
 
 # テンプレートファイルを読み込む
 def load_template(path: str) -> str:
@@ -111,25 +94,11 @@ def build_message(template: str, video_id: str, title: str) -> str:
 
 
 # Blueskyに投稿（画像があればサムネ付き）
-def post_to_bluesky(handle: str, app_password: str, text: str, thumb_url: str | None) -> None:
+def post_to_bluesky(handle: str, app_password: str, text: str) -> None:
     client = Client()
     client.login(handle, app_password)
 
-    if thumb_url:
-        client.send_post(
-            text=text,
-            embed={
-                "$type": "app.bsky.embed.external",
-                "external": {
-                    "uri": text.split("\n")[1],  # URL部分
-                    "title": "YouTube Live",
-                    "description": "配信中",
-                    "thumb": client.upload_blob(download_image(thumb_url)).blob,
-                },
-            },
-        )
-    else:
-        client.send_post(text=text)
+    client.send_post(text=text)
 
 
 # メイン処理
@@ -151,7 +120,7 @@ def main() -> int:
     else:
         template = os.getenv(
             "MESSAGE_TEMPLATE",
-            "「{title}」\n{url}（{now}）\n@YouTubeより配信中！"
+            "「{title}」\n{url} {now}\n@YouTubeより配信中！"
         )
 
     # 前回通知状態を取得
@@ -160,7 +129,7 @@ def main() -> int:
 
     try:
         # YouTubeからライブ情報取得
-        live_video_id, title, thumb_url = youtube_get_live_video(yt_api_key, yt_channel_id)
+        live_video_id, title = youtube_get_live_video(yt_api_key, yt_channel_id)
     except Exception as e:
         print(f"ERROR: YouTube API call failed: {e}", file=sys.stderr)
         return 2
@@ -182,18 +151,11 @@ def main() -> int:
     msg = build_message(template, live_video_id, title)
 
     try:
-        image_bytes = None
-
-        # サムネイルがあれば取得
-        if thumb_url:
-            image_bytes = download_image(thumb_url)
-
         # Blueskyへ投稿（画像が取れなければテキストのみ）
         post_to_bluesky(
             bsky_handle,
             bsky_app_password,
-            msg,
-            image_bytes
+            msg
         )
     except Exception as e:
         print(f"ERROR: Bluesky post failed: {e}", file=sys.stderr)
