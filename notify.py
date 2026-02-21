@@ -1,7 +1,6 @@
 import json
 import os
 import sys
-import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
 
@@ -21,53 +20,34 @@ def must_env(name: str) -> str:
     return v
 
 
-def read_text_file_guess_encoding(path: str) -> Optional[str]:
-    try:
-        with open(path, "rb") as f:
-            raw = f.read()
-    except FileNotFoundError:
-        return None
-
-    # BOMあり/UTF-16の可能性を先に潰す
-    for enc in (
-        "utf-8-sig",
-        "utf-16",
-        "utf-16le",
-        "utf-16be",
-        "utf-8",
-        "cp932",
-        "shift_jis",
-        "euc_jp",
-    ):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            pass
-
-    # 最終手段: 置換して続行（落とさない）
-    return raw.decode("utf-8", errors="replace")
-
-
 def load_state(path: str) -> Dict[str, Any]:
-    txt = read_text_file_guess_encoding(path)
-    if txt is None:
-        return {}
-
     try:
-        return json.loads(txt)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
     except json.JSONDecodeError:
         return {}
 
 
 def save_state(path: str, state: Dict[str, Any]) -> None:
-    dirpath = os.path.dirname(path)
-    if dirpath:
-        os.makedirs(dirpath, exist_ok=True)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str], Optional[str]]:
+def load_template(path: str) -> Optional[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        if content.strip() == "":
+            return None
+        return content
+    except FileNotFoundError:
+        return None
+
+
+def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     params = {
         "key": api_key,
         "part": "snippet",
@@ -83,24 +63,32 @@ def youtube_get_live_video(api_key: str, channel_id: str) -> Tuple[Optional[str]
 
     items = data.get("items", [])
     if not items:
-        return None, None
+        return None, None, None
 
     item = items[0]
     video_id = (item.get("id") or {}).get("videoId")
-    title = ((item.get("snippet") or {}).get("title")) or None
-    return video_id, title
+    snippet = item.get("snippet") or {}
+
+    title = snippet.get("title")
+    thumbnails = snippet.get("thumbnails") or {}
+
+    thumb_url = (
+        (thumbnails.get("maxres") or {}).get("url")
+        or (thumbnails.get("high") or {}).get("url")
+        or (thumbnails.get("medium") or {}).get("url")
+        or (thumbnails.get("default") or {}).get("url")
+    )
+
+    return video_id, title, thumb_url
 
 
-def load_template(path: str) -> Optional[str]:
-    return read_text_file_guess_encoding(path)
-
-
-def build_message(template: str, video_id: str, title: str) -> str:
+def build_message(template: str, video_id: str, title: str) -> Tuple[str, str]:
     url = f"https://www.youtube.com/watch?v={video_id}"
+
     jst = timezone(timedelta(hours=9))
     now = datetime.now(jst).strftime("%Y-%m-%d %H:%M")
 
-    msg = (
+    text = (
         template
         .replace("{url}", url)
         .replace("{video_id}", video_id)
@@ -108,18 +96,31 @@ def build_message(template: str, video_id: str, title: str) -> str:
         .replace("{now}", now)
     )
 
-    # URL直後に文字がくっついてリンク化が不安定になるのを予防
-    msg = msg.replace(url + "（", url + "\n（")
-    msg = msg.replace(url + " (", url + "\n(")
-
-    # 末尾の余計な空白だけ整理
-    return msg.strip()
+    return text, url
 
 
-def post_to_bluesky(handle: str, app_password: str, text: str) -> None:
+def post_to_bluesky_external(
+    handle: str,
+    app_password: str,
+    text: str,
+    url: str,
+    card_title: str,
+    card_description: str,
+) -> None:
     client = Client()
     client.login(handle, app_password)
-    client.send_post(text=text)
+
+    client.send_post(
+        text=text,
+        embed={
+            "$type": "app.bsky.embed.external",
+            "external": {
+                "uri": url,
+                "title": card_title,
+                "description": card_description,
+            },
+        },
+    )
 
 
 def main() -> int:
@@ -130,25 +131,23 @@ def main() -> int:
 
     state_path = os.getenv("STATE_PATH", ".state/state.json")
 
-    template_path = os.getenv("TEMPLATE_PATH", "template.txt")
+    template_path = os.getenv("TEMPLATE_PATH", "massage.txt")
     file_template = load_template(template_path)
+
+    default_template = "「{title}」\n{url}\n（{now}）\n@YouTubeより配信中！"
 
     if file_template:
         template = file_template
     else:
-        template = os.getenv(
-            "MESSAGE_TEMPLATE",
-            "「{title}」\n{url}\n（{now}）\n@YouTubeより配信中！"
-        )
+        template = os.getenv("MESSAGE_TEMPLATE", default_template)
 
     state = load_state(state_path)
     last_notified = state.get("last_notified_video_id")
 
     try:
-        live_video_id, title = youtube_get_live_video(yt_api_key, yt_channel_id)
+        live_video_id, title, _ = youtube_get_live_video(yt_api_key, yt_channel_id)
     except Exception as e:
-        print(f"ERROR: YouTube API call failed: {type(e).__name__}: {e!r}", file=sys.stderr)
-        print(traceback.format_exc(), file=sys.stderr)
+        print(f"ERROR: YouTube API call failed: {e}", file=sys.stderr)
         return 2
 
     if not live_video_id:
@@ -160,13 +159,19 @@ def main() -> int:
         return 0
 
     title = title or "配信中"
-    msg = build_message(template, live_video_id, title)
+    msg, url = build_message(template, live_video_id, title)
 
     try:
-        post_to_bluesky(bsky_handle, bsky_app_password, msg)
+        post_to_bluesky_external(
+            bsky_handle,
+            bsky_app_password,
+            msg,
+            url,
+            title,
+            "YouTubeで配信中",
+        )
     except Exception as e:
-        print(f"ERROR: Bluesky post failed: {type(e).__name__}: {e!r}", file=sys.stderr)
-        print(traceback.format_exc(), file=sys.stderr)
+        print(f"ERROR: Bluesky post failed: {e}", file=sys.stderr)
         return 3
 
     state["last_notified_video_id"] = live_video_id
