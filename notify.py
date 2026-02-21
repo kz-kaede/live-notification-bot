@@ -84,6 +84,13 @@ def download_image(url: str) -> bytes:
     r.raise_for_status()
     return r.content
 
+# テンプレートファイルを読み込む
+def load_template(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
 
 # 投稿メッセージをテンプレートから生成
 def build_message(template: str, video_id: str, title: str) -> str:
@@ -140,11 +147,17 @@ def main() -> int:
 
     state_path = os.getenv("STATE_PATH", ".state/state.json")
 
-    # 投稿テンプレート（環境変数で上書き可能）
-    template = os.getenv(
-        "MESSAGE_TEMPLATE",
-        "「{title}」\n{url}（{now}）\n@YouTubeより配信中！"
-    )
+    # 投稿テンプレート（template.txt を優先。無ければ環境変数、さらに無ければデフォルト）
+    template_path = os.getenv("TEMPLATE_PATH", "template.txt")
+    file_template = load_template(template_path)
+
+    if file_template:
+        template = file_template
+    else:
+        template = os.getenv(
+            "MESSAGE_TEMPLATE",
+            "「{title}」\n{url}（{now}）\n@YouTubeより配信中！"
+        )
 
     # 前回通知状態を取得
     state = load_state(state_path)
@@ -152,9 +165,7 @@ def main() -> int:
 
     try:
         # YouTubeからライブ情報取得
-        live_video_id, title, thumb_url = youtube_get_live_video(
-            yt_api_key, yt_channel_id
-        )
+        live_video_id, title, thumb_url = youtube_get_live_video(yt_api_key, yt_channel_id)
     except Exception as e:
         print(f"ERROR: YouTube API call failed: {e}", file=sys.stderr)
         return 2
@@ -182,14 +193,13 @@ def main() -> int:
         if thumb_url:
             image_bytes = download_image(thumb_url)
 
-        # Blueskyへ投稿
+        # Blueskyへ投稿（画像が取れなければテキストのみ）
         post_to_bluesky(
             bsky_handle,
             bsky_app_password,
             msg,
             image_bytes
         )
-
     except Exception as e:
         print(f"ERROR: Bluesky post failed: {e}", file=sys.stderr)
         return 3
