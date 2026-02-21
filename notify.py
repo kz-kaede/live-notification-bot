@@ -131,7 +131,7 @@ def main() -> int:
 
     state_path = os.getenv("STATE_PATH", ".state/state.json")
 
-    template_path = os.getenv("TEMPLATE_PATH", "massage.txt")
+    template_path = os.getenv("TEMPLATE_PATH", "template.txt")
     file_template = load_template(template_path)
 
     default_template = "「{title}」\n{url}\n（{now}）\n@YouTubeより配信中！"
